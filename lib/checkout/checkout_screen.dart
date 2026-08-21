@@ -189,6 +189,8 @@ class _CheckoutScreenState extends State<CheckoutScreen>
           return 0.0;
         } else if (duration <= 30) {
           return halfHourlyRate;
+        } else if (duration <= 60) {
+          return hourlyRate;
         } else {
           int intervals = (duration / 30).ceil();
           return ((intervals ~/ 2) * hourlyRate +
@@ -199,7 +201,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         final halfHourlyRate = vehicleRate.halfHourlyRate;
         final hourlyRate = vehicleRate.hourlyRate;
 
-        if (duration <= 0) {
+        if (duration <= freeTime) {
           return 0.0;
         }
 
