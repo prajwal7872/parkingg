@@ -468,7 +468,9 @@ Paid by: ${paymentMethod == 'QR' ? 'QR' : 'Cash'}
               ),
 
               // Already-checked-out banner (read-only — no checkout allowed)
-              if (_shouldShowDetails && ticketData != null && _alreadyCheckedOut)
+              if (_shouldShowDetails &&
+                  ticketData != null &&
+                  _alreadyCheckedOut)
                 Padding(
                   padding: const EdgeInsets.all(16.0),
                   child: Container(
