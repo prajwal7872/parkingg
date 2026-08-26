@@ -25,12 +25,17 @@ class DatabaseHelper {
     String path = join(documentsDirectory.path, 'parking_data.db');
     return await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: _onCreate,
       onUpgrade: (db, oldV, newV) async {
         if (oldV < 2) {
           await db.execute(
             'ALTER TABLE parking_records ADD COLUMN payment_method TEXT',
+          );
+        }
+        if (oldV < 3) {
+          await db.execute(
+            'ALTER TABLE parking_records ADD COLUMN card_uid TEXT',
           );
         }
       },
@@ -52,7 +57,8 @@ class DatabaseHelper {
         duration TEXT,
         is_synced INTEGER DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        payment_method TEXT
+        payment_method TEXT,
+        card_uid TEXT
       )
     ''');
   }
@@ -66,19 +72,39 @@ class DatabaseHelper {
         'vehicle_type': record['vehicle_type'],
         'checkin_time': record['checkin_time'],
         'checkedin_by': record['checkedin_by'],
+        'card_uid': record['card_uid']?.toString().toUpperCase(),
         'is_synced': 0,
       });
     });
   }
 
+  Future<Map<String, dynamic>?> getRecordByCardUid(String cardUid) async {
+    final db = await database;
+    final results = await db.query(
+      'parking_records',
+      where: 'card_uid = ? AND checkout_time IS NULL',
+      whereArgs: [cardUid.toUpperCase()],
+      orderBy: 'id DESC',
+      limit: 1,
+    );
+    if (results.isNotEmpty) return results.first;
+    return null;
+  }
+
+  Future<bool> isCardCurrentlyInside(String cardUid) async {
+    final record = await getRecordByCardUid(cardUid);
+    return record != null;
+  }
+
   Future<List<Map<String, dynamic>>> searchVehicleLocally(
-    String vehicleNumber,
+    String query,
   ) async {
     final db = await database;
     return await db.query(
       'parking_records',
-      where: 'vehicle_number = ?',
-      whereArgs: [vehicleNumber],
+      where: 'vehicle_number LIKE ? OR card_uid = ?',
+      whereArgs: ['%$query%', query.toUpperCase()],
+      orderBy: '(checkout_time IS NULL) DESC, id DESC',
     );
   }
 
@@ -119,17 +145,12 @@ class DatabaseHelper {
 
   Future<String> exportToCsv() async {
     final db = await database;
-    final records = await db.query('parking_records');
+    final records = await db.query('parking_records', where: 'is_synced = 0');
 
-    if (records.isEmpty) {
-      return '';
-    }
+    if (records.isEmpty) return '';
 
-    // Create CSV data
-    List<List<dynamic>> csvData = [];
-
-    // Add header
-    csvData.add([
+    List<List<dynamic>> rows = [];
+    rows.add([
       'receipt_id',
       'vehicle_number',
       'vehicle_type',
@@ -138,13 +159,11 @@ class DatabaseHelper {
       'checkedin_by',
       'checkedout_by',
       'amount',
-      'duration',
       'payment_method',
     ]);
 
-    // Add records
     for (var record in records) {
-      csvData.add([
+      rows.add([
         record['receipt_id'],
         record['vehicle_number'],
         record['vehicle_type'],
@@ -153,12 +172,39 @@ class DatabaseHelper {
         record['checkedin_by'],
         record['checkedout_by'],
         record['amount'],
-        record['duration'],
         record['payment_method'],
       ]);
     }
 
-    // Convert to CSV string
-    return const ListToCsvConverter().convert(csvData);
+    return const ListToCsvConverter().convert(rows);
+  }
+
+  Future<Map<String, dynamic>> getGateStatistics() async {
+    final db = await database;
+    final now = DateTime.now();
+    final todayPrefix =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+
+    final parkedCountResult = await db.rawQuery(
+      'SELECT COUNT(*) as count FROM parking_records WHERE checkout_time IS NULL',
+    );
+    final parkedCount = Sqflite.firstIntValue(parkedCountResult) ?? 0;
+
+    final exitedResult = await db.rawQuery(
+      'SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM parking_records WHERE checkout_time IS NOT NULL AND checkout_time LIKE ?',
+      ['$todayPrefix%'],
+    );
+
+    final exitedCount =
+        exitedResult.isNotEmpty ? (exitedResult.first['count'] as int? ?? 0) : 0;
+    final totalCollection = exitedResult.isNotEmpty
+        ? (exitedResult.first['total'] as num? ?? 0.0).toDouble()
+        : 0.0;
+
+    return {
+      'parkedCount': parkedCount,
+      'exitedCount': exitedCount,
+      'totalCollection': totalCollection,
+    };
   }
 }

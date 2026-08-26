@@ -91,4 +91,28 @@ class VehicleService {
       return {'error': e.toString()};
     }
   }
+
+  Future<List<dynamic>> searchVehicle({required String query}) async {
+    try {
+      final token = await SecureStorage.getAccessToken();
+      final response = await http.get(
+        Uri.parse(
+          '${ApiEndpoints.baseUrl}parkinginfo/parking-details/search-vehicle/?query=$query',
+        ),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer $token",
+        },
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final data = json.decode(response.body);
+        if (data is List) return data;
+        return [];
+      }
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
 }

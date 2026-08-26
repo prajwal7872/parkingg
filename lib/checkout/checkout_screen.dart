@@ -10,6 +10,8 @@ import 'package:parking/home/models/vehicleratemodel.dart';
 import 'package:parking/main.dart';
 import 'package:intl/intl.dart';
 
+import 'package:parking/services/nfc_service.dart';
+
 class CheckoutScreen extends StatefulWidget {
   final List<VehicleRate> vehicleRates;
   final Map<String, String> parkingSlipDetails;
@@ -41,6 +43,8 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   final bool _showCamera = true;
   final DatabaseHelper _dbHelper = DatabaseHelper();
   final VehicleService vehicleService = VehicleService();
+  final NfcCardService _nfcService = NfcCardService();
+  StreamSubscription<String>? _nfcSubscription;
   int freeTime = 0;
 
   @override
@@ -49,6 +53,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     WidgetsBinding.instance.addObserver(this);
     _initializeCamera();
     _setupScannerListener();
+    _setupNfcListener();
     _initPrinter();
     fetchfreetime();
   }
@@ -56,6 +61,8 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _nfcSubscription?.cancel();
+    _nfcService.stopListening();
     // Do NOT dispose _cameraController here since it's managed by CameraManager
     super.dispose();
   }
@@ -111,6 +118,90 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     });
 
     scannerChannel.invokeMethod('startScanner');
+  }
+
+  void _setupNfcListener() {
+    _nfcService.startListening();
+    _nfcSubscription = _nfcService.onCardScanned.listen((cardUid) {
+      _processCardScan(cardUid);
+    });
+  }
+
+  Future<void> _processCardScan(String cardUid) async {
+    if (_isProcessingScan) return;
+
+    setState(() {
+      _isProcessingScan = true;
+      apiResponseMessage = null;
+    });
+
+    try {
+      // 1. Look up in local SQLite for active card checkin
+      final record = await _dbHelper.getRecordByCardUid(cardUid);
+      if (record != null) {
+        final checkInTimeStr = record['checkin_time']?.toString() ?? '';
+        final checkInTime = DateTime.tryParse(checkInTimeStr) ?? DateTime.now();
+
+        final parsedData = {
+          'vehicleNumber': record['vehicle_number']?.toString() ?? '',
+          'vehicleType': record['vehicle_type']?.toString() ?? '',
+          'receiptID': record['receipt_id']?.toString() ?? '',
+          'checkInTime': checkInTime,
+          'cardUid': cardUid,
+        };
+
+        setState(() {
+          ticketData = parsedData;
+          parkingFee = calculateParkingFee(parsedData)?.toDouble();
+          _shouldShowDetails = true;
+          _alreadyCheckedOut = false;
+        });
+        HapticFeedback.heavyImpact();
+        return;
+      }
+
+      // 2. Fallback: Search online backend if not in local SQLite
+      try {
+        final searchResults = await vehicleService.searchVehicle(query: cardUid);
+        if (searchResults.isNotEmpty) {
+          final s = searchResults[0];
+          final checkInTimeStr = s['checkin_time']?.toString() ?? '';
+          final checkInTime = DateTime.tryParse(checkInTimeStr) ?? DateTime.now();
+
+          final parsedData = {
+            'vehicleNumber': s['vehicle_number']?.toString() ?? '',
+            'vehicleType': s['vehicle_type']?.toString() ?? '',
+            'receiptID': s['receipt_id']?.toString() ?? '',
+            'checkInTime': checkInTime,
+            'cardUid': cardUid,
+          };
+
+          setState(() {
+            ticketData = parsedData;
+            parkingFee = calculateParkingFee(parsedData)?.toDouble();
+            _shouldShowDetails = true;
+            _alreadyCheckedOut = s['checkout_status'] == true;
+          });
+          HapticFeedback.heavyImpact();
+          return;
+        }
+      } catch (_) {}
+
+      // If not found anywhere
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          content: Text('❌ No active parking session found for Card $cardUid'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } catch (e) {
+      print('Card checkout error: $e');
+    } finally {
+      if (mounted) setState(() => _isProcessingScan = false);
+    }
   }
 
   Future<void> _processScanData(String scanData) async {
@@ -432,19 +523,21 @@ Paid by: ${paymentMethod == 'QR' ? 'QR' : 'Cash'}
                   children: [
                     SizedBox(height: 20),
                     Container(
-                      width: 250,
-                      height: 250,
+                      width: 260,
+                      height: 260,
                       decoration: BoxDecoration(
                         border: Border.all(color: Colors.white, width: 2),
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: Center(
+                      child: const Center(
                         child: Text(
-                          'Align QR code within frame',
+                          'Scan QR Ticket\n— OR —\nTap Smart Card',
+                          textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
+                            height: 1.4,
                           ),
                         ),
                       ),

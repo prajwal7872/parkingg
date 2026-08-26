@@ -1,4 +1,3 @@
-
 package com.example.parking
 
 import android.content.BroadcastReceiver
@@ -7,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
+import android.nfc.NfcAdapter
+import android.nfc.Tag
 import android.os.Bundle
 import android.os.IBinder
 import io.flutter.embedding.android.FlutterActivity
@@ -15,10 +16,14 @@ import io.flutter.plugin.common.MethodChannel
 import com.iposprinter.iposprinterservice.IPosPrinterService
 import com.iposprinter.iposprinterservice.IPosPrinterCallback
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterActivity(), NfcAdapter.ReaderCallback {
     private val CHANNEL = "com.example.test/printer"
     private val SCANNER_CHANNEL = "com.example.test/scanner"
+    private val NFC_CHANNEL = "com.example.test/nfc"
+
     private var mIPosPrinterService: IPosPrinterService? = null
+    private var nfcAdapter: NfcAdapter? = null
+    private var isNfcListening = false
 
     // Printer callback
     private val printerCallback = object : IPosPrinterCallback.Stub() {
@@ -63,17 +68,61 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+
         // Register scanner receiver
         val filter = IntentFilter().apply {
             addAction("com.android.scanservice.scan.broadcast")
             addAction("com.android.action.GETDATA_FROM_UART")
             priority = IntentFilter.SYSTEM_HIGH_PRIORITY
         }
-       if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-        registerReceiver(scannerBroadcastReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-    } else {
-        registerReceiver(scannerBroadcastReceiver, filter)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(scannerBroadcastReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(scannerBroadcastReceiver, filter)
+        }
     }
+
+    override fun onResume() {
+        super.onResume()
+        if (isNfcListening) {
+            enableNfcReaderMode()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        disableNfcReaderMode()
+    }
+
+    private fun enableNfcReaderMode() {
+        nfcAdapter?.let { adapter ->
+            if (adapter.isEnabled) {
+                val flags = NfcAdapter.FLAG_READER_NFC_A or
+                            NfcAdapter.FLAG_READER_NFC_B or
+                            NfcAdapter.FLAG_READER_NFC_F or
+                            NfcAdapter.FLAG_READER_NFC_V or
+                            NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS
+                adapter.enableReaderMode(this, this, flags, null)
+            }
+        }
+    }
+
+    private fun disableNfcReaderMode() {
+        nfcAdapter?.disableReaderMode(this)
+    }
+
+    override fun onTagDiscovered(tag: Tag?) {
+        if (tag == null) return
+        val tagId = tag.id
+        if (tagId != null && tagId.isNotEmpty()) {
+            val hexUid = tagId.joinToString("") { "%02X".format(it) }
+            runOnUiThread {
+                flutterEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
+                    MethodChannel(messenger, NFC_CHANNEL).invokeMethod("onCardScanned", hexUid)
+                }
+            }
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -142,8 +191,28 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SCANNER_CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "startScanner" -> {
-                    // Some devices need explicit start command
                     sendBroadcast(Intent("com.android.scanservice.start"))
+                    result.success(true)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        // NFC / MIFARE Card Channel
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, NFC_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isNfcAvailable" -> {
+                    val available = nfcAdapter != null && nfcAdapter!!.isEnabled
+                    result.success(available)
+                }
+                "startNfcListener" -> {
+                    isNfcListening = true
+                    enableNfcReaderMode()
+                    result.success(true)
+                }
+                "stopNfcListener" -> {
+                    isNfcListening = false
+                    disableNfcReaderMode()
                     result.success(true)
                 }
                 else -> result.notImplemented()
@@ -153,6 +222,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        disableNfcReaderMode()
         try {
             unregisterReceiver(scannerBroadcastReceiver)
             unbindService(printerServiceConnection)
