@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.nfc.NfcAdapter
 import android.nfc.Tag
+import android.nfc.tech.MifareClassic
 import android.os.Bundle
 import android.os.IBinder
 import io.flutter.embedding.android.FlutterActivity
@@ -24,6 +25,12 @@ class MainActivity : FlutterActivity(), NfcAdapter.ReaderCallback {
     private var mIPosPrinterService: IPosPrinterService? = null
     private var nfcAdapter: NfcAdapter? = null
     private var isNfcListening = false
+
+    @Volatile
+    private var pendingWriteData: String? = null
+
+    @Volatile
+    private var shouldClearOnNextTap: Boolean = false
 
     // Printer callback
     private val printerCallback = object : IPosPrinterCallback.Stub() {
@@ -112,15 +119,118 @@ class MainActivity : FlutterActivity(), NfcAdapter.ReaderCallback {
         nfcAdapter?.disableReaderMode(this)
     }
 
+    private fun writeMifareData(mifare: MifareClassic, text: String): Boolean {
+        val key = MifareClassic.KEY_DEFAULT
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        val maxBytes = 64
+        val paddedBytes = ByteArray(maxBytes)
+        System.arraycopy(bytes, 0, paddedBytes, 0, minOf(bytes.size, maxBytes))
+
+        // Write Sector 1 (Blocks 4, 5, 6)
+        if (mifare.authenticateSectorWithKeyA(1, key)) {
+            mifare.writeBlock(4, paddedBytes.copyOfRange(0, 16))
+            mifare.writeBlock(5, paddedBytes.copyOfRange(16, 32))
+            mifare.writeBlock(6, paddedBytes.copyOfRange(32, 48))
+        } else {
+            return false
+        }
+
+        // Write Sector 2 (Block 8)
+        if (mifare.authenticateSectorWithKeyA(2, key)) {
+            mifare.writeBlock(8, paddedBytes.copyOfRange(48, 64))
+        }
+        return true
+    }
+
+    private fun readMifareData(mifare: MifareClassic): String {
+        val key = MifareClassic.KEY_DEFAULT
+        val output = ByteArray(64)
+        var readLen = 0
+
+        // Read Sector 1 (Blocks 4, 5, 6)
+        if (mifare.authenticateSectorWithKeyA(1, key)) {
+            val b4 = mifare.readBlock(4)
+            val b5 = mifare.readBlock(5)
+            val b6 = mifare.readBlock(6)
+            System.arraycopy(b4, 0, output, 0, 16)
+            System.arraycopy(b5, 0, output, 16, 16)
+            System.arraycopy(b6, 0, output, 32, 16)
+            readLen = 48
+        } else {
+            return ""
+        }
+
+        // Read Sector 2 (Block 8)
+        if (mifare.authenticateSectorWithKeyA(2, key)) {
+            val b8 = mifare.readBlock(8)
+            System.arraycopy(b8, 0, output, 48, 16)
+            readLen = 64
+        }
+
+        val validBytes = output.take(readLen).takeWhile { it != 0.toByte() }.toByteArray()
+        return String(validBytes, Charsets.UTF_8).trim()
+    }
+
+    private fun clearMifareData(mifare: MifareClassic): Boolean {
+        val key = MifareClassic.KEY_DEFAULT
+        val emptyBlock = ByteArray(16)
+
+        if (mifare.authenticateSectorWithKeyA(1, key)) {
+            mifare.writeBlock(4, emptyBlock)
+            mifare.writeBlock(5, emptyBlock)
+            mifare.writeBlock(6, emptyBlock)
+        } else {
+            return false
+        }
+
+        if (mifare.authenticateSectorWithKeyA(2, key)) {
+            mifare.writeBlock(8, emptyBlock)
+        }
+        return true
+    }
+
     override fun onTagDiscovered(tag: Tag?) {
         if (tag == null) return
         val tagId = tag.id
-        if (tagId != null && tagId.isNotEmpty()) {
-            val hexUid = tagId.joinToString("") { "%02X".format(it) }
-            runOnUiThread {
-                flutterEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
-                    MethodChannel(messenger, NFC_CHANNEL).invokeMethod("onCardScanned", hexUid)
+        if (tagId == null || tagId.isEmpty()) return
+        val hexUid = tagId.joinToString("") { "%02X".format(it) }
+
+        var ticketData = ""
+        var writeSuccess = false
+        val mifare = MifareClassic.get(tag)
+
+        if (mifare != null) {
+            try {
+                mifare.connect()
+                val writeText = pendingWriteData
+                if (writeText != null && writeText.isNotEmpty()) {
+                    writeSuccess = writeMifareData(mifare, writeText)
+                    ticketData = writeText
+                    pendingWriteData = null
+                } else if (shouldClearOnNextTap) {
+                    clearMifareData(mifare)
+                    shouldClearOnNextTap = false
+                } else {
+                    ticketData = readMifareData(mifare)
                 }
+            } catch (e: Exception) {
+                println("MIFARE operation error: $e")
+            } finally {
+                try {
+                    mifare.close()
+                } catch (_: Exception) {}
+            }
+        }
+
+        val resultMap = mapOf(
+            "cardUid" to hexUid,
+            "ticketData" to ticketData,
+            "writeSuccess" to writeSuccess
+        )
+
+        runOnUiThread {
+            flutterEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
+                MethodChannel(messenger, NFC_CHANNEL).invokeMethod("onCardScanned", resultMap)
             }
         }
     }
@@ -198,7 +308,7 @@ class MainActivity : FlutterActivity(), NfcAdapter.ReaderCallback {
             }
         }
 
-        // NFC / MIFARE Card Channel
+        // NFC / MIFARE Card Channel with Sector Read/Write
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, NFC_CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "isNfcAvailable" -> {
@@ -213,6 +323,19 @@ class MainActivity : FlutterActivity(), NfcAdapter.ReaderCallback {
                 "stopNfcListener" -> {
                     isNfcListening = false
                     disableNfcReaderMode()
+                    result.success(true)
+                }
+                "setPendingWriteData" -> {
+                    val data = call.argument<String>("data")
+                    pendingWriteData = data
+                    result.success(true)
+                }
+                "clearPendingWriteData" -> {
+                    pendingWriteData = null
+                    result.success(true)
+                }
+                "prepareClearCard" -> {
+                    shouldClearOnNextTap = true
                     result.success(true)
                 }
                 else -> result.notImplemented()

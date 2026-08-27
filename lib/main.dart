@@ -15,7 +15,7 @@ void main() async {
   if (savedBaseUrl != null && savedBaseUrl.isNotEmpty) {
     ApiEndpoints.baseUrl = savedBaseUrl;
   }
-  String? token = await storage.read(key: "access_token");  
+  String? token = await storage.read(key: "access_token");
   SyncService().startAutoSync();
   await CameraManager().initialize();
   runApp(MyApp(isLoggedIn: token != null));
@@ -52,8 +52,7 @@ class CameraManager {
         await _controller!.initialize();
         _isInitialized = true;
       }
-    } catch (_) {
-    }
+    } catch (_) {}
   }
 
   CameraController? get controller => _controller;

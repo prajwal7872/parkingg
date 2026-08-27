@@ -29,9 +29,12 @@ class _VehicleDetailsScreenState extends State<VehicleDetailsScreen> {
   final VehicleService vehicleService = VehicleService();
 
   final TextEditingController _vcontroller = TextEditingController();
-  StreamSubscription<String>? _nfcSubscription;
+  StreamSubscription<NfcCardResult>? _nfcSubscription;
   bool _isProcessingCheckIn = false;
   bool _isNfcAvailable = false;
+  String? _currentPendingPayload;
+  String? _currentPendingReceiptId;
+  String? _currentPendingCheckInIso;
 
   String vn = '';
   String rid = '';
@@ -52,6 +55,7 @@ class _VehicleDetailsScreenState extends State<VehicleDetailsScreen> {
     _initializeData();
     _loadAllData();
     _initNfcListener();
+    _vcontroller.addListener(_onVehicleNumberChanged);
   }
 
   void _initializeData() {
@@ -68,19 +72,38 @@ class _VehicleDetailsScreenState extends State<VehicleDetailsScreen> {
     lastname = nameParts.length > 1 ? nameParts.sublist(1).join(' ') : '';
   }
 
+  void _onVehicleNumberChanged() {
+    final vehicleNo = _vcontroller.text.trim();
+    if (vehicleNo.isNotEmpty) {
+      _currentPendingReceiptId = Ticket.generateReceiptID();
+      _currentPendingCheckInIso = DateTime.now().toIso8601String();
+      final vt = widget.vehicleRate.vehicleType;
+      _currentPendingPayload =
+          "$vehicleNo;$vt;$_currentPendingReceiptId;$_currentPendingCheckInIso";
+      _nfcService.setPendingWriteData(_currentPendingPayload!);
+    } else {
+      _currentPendingPayload = null;
+      _currentPendingReceiptId = null;
+      _currentPendingCheckInIso = null;
+      _nfcService.clearPendingWriteData();
+    }
+  }
+
   Future<void> _initNfcListener() async {
     _isNfcAvailable = await _nfcService.isNfcAvailable();
     if (mounted) setState(() {});
     await _nfcService.startListening();
 
-    _nfcSubscription = _nfcService.onCardScanned.listen((cardUid) {
-      _handleCardScanned(cardUid);
+    _nfcSubscription = _nfcService.onCardScanned.listen((result) {
+      _handleCardScanned(result);
     });
   }
 
   @override
   void dispose() {
+    _vcontroller.removeListener(_onVehicleNumberChanged);
     _nfcSubscription?.cancel();
+    _nfcService.clearPendingWriteData();
     _nfcService.stopListening();
     _vcontroller.dispose();
     super.dispose();
@@ -98,7 +121,7 @@ class _VehicleDetailsScreenState extends State<VehicleDetailsScreen> {
         '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}:${dateTime.second.toString().padLeft(2, '0')}';
   }
 
-  Future<void> _handleCardScanned(String cardUid) async {
+  Future<void> _handleCardScanned(NfcCardResult result) async {
     if (_isProcessingCheckIn) return;
 
     final vehicleNo = _vcontroller.text.trim();
@@ -117,6 +140,8 @@ class _VehicleDetailsScreenState extends State<VehicleDetailsScreen> {
     setState(() => _isProcessingCheckIn = true);
 
     try {
+      final cardUid = result.cardUid;
+
       // 1. Check if this card is already assigned to a car parked inside
       final isInside = await _dbHelper.isCardCurrentlyInside(cardUid);
       if (isInside) {
@@ -133,7 +158,12 @@ class _VehicleDetailsScreenState extends State<VehicleDetailsScreen> {
       }
 
       // 2. Perform Card Check-In
-      await _executeCardCheckIn(cardUid: cardUid, vehicleNo: vehicleNo);
+      await _executeCardCheckIn(
+        cardUid: cardUid,
+        vehicleNo: vehicleNo,
+        receiptId: _currentPendingReceiptId ?? Ticket.generateReceiptID(),
+        checkInIso: _currentPendingCheckInIso ?? DateTime.now().toIso8601String(),
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -152,13 +182,14 @@ class _VehicleDetailsScreenState extends State<VehicleDetailsScreen> {
   Future<void> _executeCardCheckIn({
     required String cardUid,
     required String vehicleNo,
+    required String receiptId,
+    required String checkInIso,
   }) async {
     vn = vehicleNo;
-    rid = Ticket.generateReceiptID();
+    rid = receiptId;
     vt = widget.vehicleRate.vehicleType;
-    final now = DateTime.now();
-    final ctt = formatDateTime(now);
-    final ct = now.toIso8601String();
+    final checkInTime = DateTime.tryParse(checkInIso) ?? DateTime.now();
+    final ctt = formatDateTime(checkInTime);
 
     // 1. Save to local SQLite with card_uid
     await _dbHelper.insertCheckInRecord({
@@ -179,7 +210,7 @@ class _VehicleDetailsScreenState extends State<VehicleDetailsScreen> {
         receiptId: rid,
         vehicleNumber: vn,
         vehicleType: vt,
-        checkinTime: ct,
+        checkinTime: checkInIso,
       );
     } catch (_) {}
 
@@ -190,7 +221,7 @@ class _VehicleDetailsScreenState extends State<VehicleDetailsScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         behavior: SnackBarBehavior.floating,
-        content: Text('✅ Smart Card Assigned!\nVehicle: $vn | Card: $cardUid'),
+        content: Text('✅ Smart Card Written & Assigned!\nVehicle: $vn | Card: $cardUid'),
         backgroundColor: Colors.green,
         duration: const Duration(seconds: 2),
       ),

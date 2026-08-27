@@ -44,7 +44,7 @@ class _CheckoutScreenState extends State<CheckoutScreen>
   final DatabaseHelper _dbHelper = DatabaseHelper();
   final VehicleService vehicleService = VehicleService();
   final NfcCardService _nfcService = NfcCardService();
-  StreamSubscription<String>? _nfcSubscription;
+  StreamSubscription<NfcCardResult>? _nfcSubscription;
   int freeTime = 0;
 
   @override
@@ -122,12 +122,12 @@ class _CheckoutScreenState extends State<CheckoutScreen>
 
   void _setupNfcListener() {
     _nfcService.startListening();
-    _nfcSubscription = _nfcService.onCardScanned.listen((cardUid) {
-      _processCardScan(cardUid);
+    _nfcSubscription = _nfcService.onCardScanned.listen((result) {
+      _processCardScan(result);
     });
   }
 
-  Future<void> _processCardScan(String cardUid) async {
+  Future<void> _processCardScan(NfcCardResult result) async {
     if (_isProcessingScan) return;
 
     setState(() {
@@ -136,56 +136,69 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     });
 
     try {
-      // 1. Look up in local SQLite for active card checkin
-      final record = await _dbHelper.getRecordByCardUid(cardUid);
-      if (record != null) {
-        final checkInTimeStr = record['checkin_time']?.toString() ?? '';
-        final checkInTime = DateTime.tryParse(checkInTimeStr) ?? DateTime.now();
+      final cardUid = result.cardUid;
+      final rawTicket = result.ticketData;
+      Map<String, dynamic>? parsedData;
 
-        final parsedData = {
-          'vehicleNumber': record['vehicle_number']?.toString() ?? '',
-          'vehicleType': record['vehicle_type']?.toString() ?? '',
-          'receiptID': record['receipt_id']?.toString() ?? '',
-          'checkInTime': checkInTime,
-          'cardUid': cardUid,
-        };
+      // 1. PRIMARY (100% OFFLINE MULTI-POS): Read directly from Card internal chip!
+      if (rawTicket.isNotEmpty && rawTicket.contains(';')) {
+        parsedData = _parseQRCode(rawTicket);
+        if (parsedData != null) {
+          parsedData['cardUid'] = cardUid;
+        }
+      }
 
+      // 2. SECONDARY: Look up in local SQLite for active card checkin
+      if (parsedData == null) {
+        final record = await _dbHelper.getRecordByCardUid(cardUid);
+        if (record != null) {
+          final checkInTimeStr = record['checkin_time']?.toString() ?? '';
+          final checkInTime =
+              DateTime.tryParse(checkInTimeStr) ?? DateTime.now();
+
+          parsedData = {
+            'vehicleNumber': record['vehicle_number']?.toString() ?? '',
+            'vehicleType': record['vehicle_type']?.toString() ?? '',
+            'receiptID': record['receipt_id']?.toString() ?? '',
+            'checkInTime': checkInTime,
+            'cardUid': cardUid,
+          };
+        }
+      }
+
+      // 3. TERTIARY: Search online backend if not found locally
+      if (parsedData == null) {
+        try {
+          final searchResults =
+              await vehicleService.searchVehicle(query: cardUid);
+          if (searchResults.isNotEmpty) {
+            final s = searchResults[0];
+            final checkInTimeStr = s['checkin_time']?.toString() ?? '';
+            final checkInTime =
+                DateTime.tryParse(checkInTimeStr) ?? DateTime.now();
+
+            parsedData = {
+              'vehicleNumber': s['vehicle_number']?.toString() ?? '',
+              'vehicleType': s['vehicle_type']?.toString() ?? '',
+              'receiptID': s['receipt_id']?.toString() ?? '',
+              'checkInTime': checkInTime,
+              'cardUid': cardUid,
+            };
+            _alreadyCheckedOut = s['checkout_status'] == true;
+          }
+        } catch (_) {}
+      }
+
+      if (parsedData != null) {
         setState(() {
           ticketData = parsedData;
-          parkingFee = calculateParkingFee(parsedData)?.toDouble();
+          parkingFee = calculateParkingFee(parsedData!)?.toDouble();
           _shouldShowDetails = true;
           _alreadyCheckedOut = false;
         });
         HapticFeedback.heavyImpact();
         return;
       }
-
-      // 2. Fallback: Search online backend if not in local SQLite
-      try {
-        final searchResults = await vehicleService.searchVehicle(query: cardUid);
-        if (searchResults.isNotEmpty) {
-          final s = searchResults[0];
-          final checkInTimeStr = s['checkin_time']?.toString() ?? '';
-          final checkInTime = DateTime.tryParse(checkInTimeStr) ?? DateTime.now();
-
-          final parsedData = {
-            'vehicleNumber': s['vehicle_number']?.toString() ?? '',
-            'vehicleType': s['vehicle_type']?.toString() ?? '',
-            'receiptID': s['receipt_id']?.toString() ?? '',
-            'checkInTime': checkInTime,
-            'cardUid': cardUid,
-          };
-
-          setState(() {
-            ticketData = parsedData;
-            parkingFee = calculateParkingFee(parsedData)?.toDouble();
-            _shouldShowDetails = true;
-            _alreadyCheckedOut = s['checkout_status'] == true;
-          });
-          HapticFeedback.heavyImpact();
-          return;
-        }
-      } catch (_) {}
 
       // If not found anywhere
       if (!mounted) return;
@@ -405,6 +418,10 @@ class _CheckoutScreenState extends State<CheckoutScreen>
         'duration': '${checkoutTime.difference(checkInTime).inMinutes} mins',
         'payment_method': paymentMethod,
       });
+
+      if (ticketData?['cardUid'] != null) {
+        await _nfcService.prepareClearCard();
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
