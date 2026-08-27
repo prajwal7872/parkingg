@@ -23,6 +23,9 @@ class SyncService {
     if (_isSyncStarted) return; // Prevent duplicate calls
     _isSyncStarted = true;
 
+    // 1. Check startup sync & purge old synced records from yesterday
+    _checkStartupSyncAndCleanup();
+
     _syncTimer?.cancel();
     _syncTimer = Timer.periodic(Duration(minutes: intervalMinutes), (timer) {
       _syncData();
@@ -40,6 +43,15 @@ class SyncService {
     _midnightCleanupTimer = null;
   }
 
+  Future<void> _checkStartupSyncAndCleanup() async {
+    try {
+      await _syncData();
+      await _cleanupOldSyncedRecords();
+    } catch (e) {
+      debugPrint('Startup sync/cleanup error: $e');
+    }
+  }
+
   Future<void> _syncData() async {
     debugPrint("awaiting lock");
     await _lock.synchronized(() async {
@@ -54,6 +66,7 @@ class SyncService {
         if (success) {
           final ids = unsyncedRecords.map((r) => r['id'] as int).toList();
           await _dbHelper.markRecordsAsSynced(ids);
+          debugPrint('Successfully synced ${ids.length} records to server');
         }
       } catch (e) {
         debugPrint('Sync error: $e');
@@ -63,63 +76,66 @@ class SyncService {
 
   void _scheduleMidnightCleanup() {
     _midnightCleanupTimer?.cancel(); // Cancel any existing timer
-    debugPrint("IN SCHEDULE");
 
-    // Use local time instead of UTC to avoid timezone issues
-    final nowNepal = DateTime.now().toUtc().add(
-      Duration(hours: 5, minutes: 45),
-    );
-    final nextMidnightNepal = DateTime(
-      nowNepal.year,
-      nowNepal.month,
-      nowNepal.day + 1,
-    );
-    var durationUntilMidnight =
-        nextMidnightNepal.difference(nowNepal) +
-        Duration(hours: 5, minutes: 45);
+    // Use local time for clean trigger
+    final now = DateTime.now();
+    final nextMidnight = DateTime(now.year, now.month, now.day + 1, 0, 0, 5);
+    var durationUntilMidnight = nextMidnight.difference(now);
 
-    debugPrint("nowNepal: $nowNepal");
-    debugPrint("nextMidnightNepal: $nextMidnightNepal");
-    debugPrint("duration Till midnight: $durationUntilMidnight");
-
-    // Ensure duration is positive to avoid immediate execution
-    final minDelay = Duration(seconds: 1);
     if (durationUntilMidnight.inSeconds <= 0) {
-      debugPrint("Negative or zero duration detected, scheduling for next day");
-      final nextDayMidnight = DateTime(
-        nowNepal.year,
-        nowNepal.month,
-        nowNepal.day + 2,
-      );
-      durationUntilMidnight = nextDayMidnight.difference(nowNepal);
+      final nextDayMidnight =
+          DateTime(now.year, now.month, now.day + 2, 0, 0, 5);
+      durationUntilMidnight = nextDayMidnight.difference(now);
     }
 
-    final effectiveDuration = durationUntilMidnight < minDelay
-        ? minDelay
-        : durationUntilMidnight;
-    debugPrint("effectiveDuration: $effectiveDuration");
-
-    _midnightCleanupTimer = Timer(effectiveDuration, () async {
-      debugPrint("MIDNIGHT");
-      await _clearDatabaseAtMidnight();
+    _midnightCleanupTimer = Timer(durationUntilMidnight, () async {
+      debugPrint("MIDNIGHT CLEANUP TRIGGERED");
+      await _cleanupOldSyncedRecords();
       _scheduleMidnightCleanup(); // Schedule next cleanup
     });
   }
 
-  Future<void> _clearDatabaseAtMidnight() async {
-    debugPrint("IN CLEAR METHOD");
+  Future<void> _cleanupOldSyncedRecords() async {
     await _lock.synchronized(() async {
       try {
-        debugPrint('inside clear method');
-        // Sync unsynced records before clearing
+        // 1. Sync pending records before cleaning
         await _syncData();
+
+        final now = DateTime.now();
+        final todayPrefix =
+            '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+
+        // 14-day retention cutoff for abandoned / un-checked-out vehicles
+        final fourteenDaysAgo = now.subtract(const Duration(days: 14));
+        final cutoff14DaysStr =
+            '${fourteenDaysAgo.year}-${fourteenDaysAgo.month.toString().padLeft(2, '0')}-${fourteenDaysAgo.day.toString().padLeft(2, '0')} '
+            '${fourteenDaysAgo.hour.toString().padLeft(2, '0')}:${fourteenDaysAgo.minute.toString().padLeft(2, '0')}:${fourteenDaysAgo.second.toString().padLeft(2, '0')}';
+
         final db = await _dbHelper.database;
-        await db.transaction((txn) async {
-          await txn.delete('parking_records');
-        });
-        debugPrint('Database cleared at midnight');
+
+        // A. Safe Daily Cleanup:
+        // Delete records that are already synced (is_synced = 1), already checked out, and not from today.
+        final completedCount = await db.delete(
+          'parking_records',
+          where:
+              'is_synced = 1 AND checkout_time IS NOT NULL AND checkout_time NOT LIKE ?',
+          whereArgs: ['$todayPrefix%'],
+        );
+
+        // B. Standard 14-Day Retention Rule for Abandoned / Runaway Vehicles:
+        // Delete records that are already synced (is_synced = 1), never checked out (checkout_time IS NULL), but entered > 14 days ago.
+        final abandonedCount = await db.delete(
+          'parking_records',
+          where:
+              'is_synced = 1 AND checkout_time IS NULL AND checkin_time < ?',
+          whereArgs: [cutoff14DaysStr],
+        );
+
+        debugPrint(
+          'Cleanup: Deleted $completedCount completed records and $abandonedCount abandoned (>14d) records',
+        );
       } catch (e) {
-        debugPrint('Midnight cleanup error: $e');
+        debugPrint('Safe cleanup error: $e');
       }
     });
   }

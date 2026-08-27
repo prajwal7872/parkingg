@@ -76,7 +76,7 @@ class _ListMemberState extends State<ListMember> {
         } else {
           memberData = data['results'];
         }
-        totalPages = data['meta']['total_pages'];
+        totalPages = data['meta']?['total_pages'] ?? 1;
         isLoading = false;
       });
     } catch (e) {

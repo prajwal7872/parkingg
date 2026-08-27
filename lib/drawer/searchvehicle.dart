@@ -1,4 +1,5 @@
 // ignore_for_file: avoid_print, unused_field
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -6,7 +7,6 @@ import 'package:parking/api/checkincheckout.dart';
 import 'package:parking/auth/api_endpoints.dart';
 import 'package:parking/auth/auth_service.dart';
 import 'package:parking/database/helper_class.dart';
-import 'dart:convert';
 import 'package:parking/home/models/vehicleratemodel.dart';
 
 class SearchLostVehicleScreen extends StatefulWidget {
@@ -19,111 +19,115 @@ class SearchLostVehicleScreen extends StatefulWidget {
 
 class _SearchLostVehicleScreenState extends State<SearchLostVehicleScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
-
   static const _channel = MethodChannel('com.example.test/printer');
   final DatabaseHelper _dbHelper = DatabaseHelper();
-  bool _isOffline = false;
+  final VehicleService vehicleService = VehicleService();
+
   final TextEditingController _vehicleNumberController =
       TextEditingController();
-  double? parkingFee;
-  VehicleService vehicleService = VehicleService();
   List<dynamic> _searchResults = [];
   bool _isLoading = false;
-  bool isLoading = false;
-  DateTime? checkinTime;
-  String receiptId = "";
-  String vehicleNumber = "";
-  String vehicleType = "";
-  DateTime? co;
+  bool _isOffline = false;
+  bool _isCheckingOut = false;
+  String _selectedFilter = 'ALL'; // ALL | PARKED | CHECKED_OUT
   int freeTime = 0;
 
-  // Add state variables to store fetched data
   List<VehicleRate> vehicleRates = [];
   Map<String, String> parkingSlipDetails = {};
 
-  double? calculateParkingFee(Map<String, dynamic> data) {
-    try {
-      final checkInTimeStr = data['checkin_time'] ?? data['checkInTime'];
-
-      // Parse the string to DateTime if it's not already a DateTime object
-      final checkInTime = checkInTimeStr is DateTime
-          ? checkInTimeStr
-          : DateTime.parse(checkInTimeStr);
-
-      final vehicleType = data['vehicle_type'] as String;
-      final now = DateTime.now();
-      final duration = now.difference(checkInTime).inMinutes;
-
-      // Find matching vehicle rate from vehicleRates state variable
-      final vehicleRate = vehicleRates.firstWhere(
-        (v) => v.vehicleType == vehicleType,
-        orElse: () => throw Exception('Vehicle type not found'),
-      );
-      final useSimpleRateStructure = vehicleRate.quarterHourlyRate == 0;
-
-      if (useSimpleRateStructure) {
-        final hourlyRate = vehicleRate.hourlyRate;
-        final halfHourlyRate = vehicleRate.halfHourlyRate;
-
-        if (duration <= freeTime) {
-          return 0.0;
-        } else if (duration <= 30) {
-          return halfHourlyRate;
-        } else {
-          int intervals = (duration / 30).ceil();
-          return ((intervals ~/ 2) * hourlyRate +
-              (intervals % 2) * halfHourlyRate);
-        }
-      } else {
-        final quarterHourlyRate = vehicleRate.quarterHourlyRate;
-        final halfHourlyRate = vehicleRate.halfHourlyRate;
-        final hourlyRate = vehicleRate.hourlyRate;
-
-        if (duration <= 0) {
-          return 0.0;
-        }
-
-        // Number of completed hours
-        final completedHours = duration ~/ 60;
-
-        // Remaining minutes after full hours
-        final remainingMinutes = duration % 60;
-
-        double total = 0;
-
-        // Base hourly charge
-        if (remainingMinutes == 0) {
-          total = completedHours * hourlyRate;
-        } else {
-          total = (completedHours + 1) * hourlyRate;
-        }
-
-        // Adjust slab pricing
-        if (remainingMinutes > 0 && remainingMinutes <= 15) {
-          total = (completedHours * hourlyRate) + quarterHourlyRate;
-        } else if (remainingMinutes > 15 && remainingMinutes <= 30) {
-          total = (completedHours * hourlyRate) + halfHourlyRate;
-        } else if (remainingMinutes > 30) {
-          total = (completedHours + 1) * hourlyRate;
-        }
-
-        // Minimum 1 hour charge
-        if (total < hourlyRate) {
-          total = hourlyRate;
-        }
-
-        return total;
-      }
-    } catch (e) {
-      print('Error calculating parking fee: $e');
-      return null;
-    }
+  @override
+  void initState() {
+    super.initState();
+    _loadInitialData();
   }
 
   @override
   void dispose() {
     _vehicleNumberController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadInitialData() async {
+    try {
+      final slip = await SecureStorage.getParkingSlipDetails();
+      final ft = await SecureStorage.getFreeTime();
+      final rawRates = await SecureStorage.getParkingRates();
+      final rates = <VehicleRate>[];
+      for (final item in rawRates) {
+        try {
+          rates.add(VehicleRate.fromJson(item));
+        } catch (_) {}
+      }
+
+      if (mounted) {
+        setState(() {
+          parkingSlipDetails = slip;
+          freeTime = ft;
+          vehicleRates = rates;
+        });
+      }
+    } catch (e) {
+      debugPrint("Error loading search initial data: $e");
+    }
+  }
+
+  double? calculateParkingFee(Map<String, dynamic> data) {
+    try {
+      final checkInTimeStr = data['checkin_time'] ?? data['checkInTime'];
+      if (checkInTimeStr == null) return null;
+
+      final checkInTime = checkInTimeStr is DateTime
+          ? checkInTimeStr
+          : DateTime.parse(checkInTimeStr.toString());
+
+      final vehicleType = data['vehicle_type']?.toString() ?? '';
+      final now = DateTime.now();
+      final duration = now.difference(checkInTime).inMinutes;
+
+      final vehicleRate = vehicleRates.firstWhere(
+        (v) => v.vehicleType.toLowerCase() == vehicleType.toLowerCase(),
+        orElse: () => throw Exception('Vehicle type not found'),
+      );
+
+      final useSimpleRateStructure = vehicleRate.quarterHourlyRate == 0;
+
+      if (useSimpleRateStructure) {
+        final hourlyRate = vehicleRate.hourlyRate;
+        final halfHourlyRate = vehicleRate.halfHourlyRate;
+
+        if (duration <= freeTime) return 0.0;
+        if (duration <= 30) return halfHourlyRate;
+
+        int intervals = (duration / 30).ceil();
+        return ((intervals ~/ 2) * hourlyRate +
+            (intervals % 2) * halfHourlyRate);
+      } else {
+        final quarterHourlyRate = vehicleRate.quarterHourlyRate;
+        final halfHourlyRate = vehicleRate.halfHourlyRate;
+        final hourlyRate = vehicleRate.hourlyRate;
+
+        if (duration <= freeTime) return 0.0;
+
+        final completedHours = duration ~/ 60;
+        final remainingMinutes = duration % 60;
+        double total = 0;
+
+        if (remainingMinutes == 0) {
+          total = completedHours * hourlyRate;
+        } else if (remainingMinutes <= 15) {
+          total = (completedHours * hourlyRate) + quarterHourlyRate;
+        } else if (remainingMinutes <= 30) {
+          total = (completedHours * hourlyRate) + halfHourlyRate;
+        } else {
+          total = (completedHours + 1) * hourlyRate;
+        }
+
+        if (total < hourlyRate) total = hourlyRate;
+        return total;
+      }
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _searchVehicle() async {
@@ -134,66 +138,70 @@ class _SearchLostVehicleScreenState extends State<SearchLostVehicleScreen> {
     setState(() {
       _isLoading = true;
       _searchResults = [];
-      parkingFee = null;
     });
 
     try {
       await _searchVehicleOnline(query);
-      setState(() {
-        _isOffline = false;
-      });
+      if (mounted) setState(() => _isOffline = false);
     } catch (e) {
-      print('Online search failed, trying offline: $e');
-      await _searchVehicleOffline(query);
-      setState(() {
-        _isOffline = true;
-      });
+      debugPrint('Online search failed, trying offline: $e');
+      try {
+        await _searchVehicleOffline(query);
+        if (mounted) setState(() => _isOffline = true);
+      } catch (offlineErr) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).clearSnackBars();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              behavior: SnackBarBehavior.floating,
+              content: Text('No matching records found online or locally.'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      }
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _searchVehicleOnline(String query) async {
     final token = await SecureStorage.getAccessToken();
-    final headers = {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer $token',
-    };
-
     final response = await http
         .get(
           Uri.parse(
             '${ApiEndpoints.baseUrl}parkinginfo/parking-details/search-vehicle/?query=$query',
           ),
-          headers: headers,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
         )
-        .timeout(const Duration(seconds: 10));
+        .timeout(const Duration(seconds: 8));
 
     if (response.statusCode == 200 || response.statusCode == 201) {
       final data = json.decode(response.body);
       if (data is List && data.isNotEmpty) {
-        final vehicle = data[0];
         setState(() {
-          _searchResults = data;
-          receiptId = vehicle['receipt_id'].toString();
-          vehicleNumber = vehicle['vehicle_number'].toString();
-          vehicleType = vehicle['vehicle_type'];
-          checkinTime = DateTime.parse(vehicle['checkin_time']);
-          parkingFee = calculateParkingFee(vehicle);
+          _searchResults = data.map((v) {
+            final m = Map<String, dynamic>.from(v);
+            m['checkout_status'] =
+                m['checkout_status'] == true || m['checkout_time'] != null;
+            return m;
+          }).toList();
         });
+      } else {
+        throw Exception('No results');
       }
     } else {
-      throw Exception('Failed to load data');
+      throw Exception('Server error: ${response.statusCode}');
     }
   }
 
   Future<void> _searchVehicleOffline(String query) async {
     final localResults = await _dbHelper.searchVehicleLocally(query);
-
     if (localResults.isEmpty) {
-      throw Exception('No matching parked vehicles found locally');
+      throw Exception('No local records found');
     }
     setState(() {
       _searchResults = localResults.map((record) {
@@ -202,478 +210,474 @@ class _SearchLostVehicleScreenState extends State<SearchLostVehicleScreen> {
           'vehicle_number': record['vehicle_number'],
           'vehicle_type': record['vehicle_type'],
           'checkin_time': record['checkin_time'],
+          'checkout_time': record['checkout_time'],
           'checkout_status': record['checkout_time'] != null,
           'checkedin_by': record['checkedin_by'],
+          'amount': record['amount'],
+          'payment_method': record['payment_method'],
         };
       }).toList();
-
-      final vehicle = localResults[0];
-      receiptId = vehicle['receipt_id'].toString();
-      vehicleNumber = vehicle['vehicle_number'].toString();
-      vehicleType = vehicle['vehicle_type'];
-      checkinTime = DateTime.parse(vehicle['checkin_time']);
-      parkingFee = calculateParkingFee(vehicle);
     });
   }
 
-  String formatDateTime(DateTime dateTime) {
-    return '${dateTime.year}-${dateTime.month.toString().padLeft(2, '0')}-${dateTime.day.toString().padLeft(2, '0')} '
-        '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}:${dateTime.second.toString().padLeft(2, '0')}';
+  String formatDateTime(DateTime dt) {
+    return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
+        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
   }
 
-  Future<void> handleCheckoutAndPrint({required String paymentMethod}) async {
-    if (parkingFee == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Could not calculate parking fee'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
+  Future<void> handleCheckoutAndPrint({
+    required Map<String, dynamic> item,
+    required String paymentMethod,
+  }) async {
+    final fee = calculateParkingFee(item);
+    if (fee == null) return;
 
-    setState(() {
-      isLoading = true;
-    });
+    setState(() => _isCheckingOut = true);
 
     try {
       final heading1 = parkingSlipDetails['heading1'] ?? '';
       final heading2 = parkingSlipDetails['heading2'] ?? '';
       final heading3 = parkingSlipDetails['heading3'] ?? '';
       final heading4 = parkingSlipDetails['heading4'] ?? '';
+      final footerText = parkingSlipDetails['footerText'];
       final fullName = parkingSlipDetails['full_name'] ?? 'Operator';
-      final id = parkingSlipDetails['id'];
-      co = DateTime.now();
-      double amount = parkingFee!;
-      DateTime now = DateTime.now();
-      String ctt = formatDateTime(now);
-      String checkoutDate = "${now.year}/${now.month}/${now.day}";
-      String hour = (now.hour % 12 == 0) ? '12' : (now.hour % 12).toString();
-      String amPm = now.hour < 12 ? 'AM' : 'PM';
-      String checkoutTime =
-          "$hour:${now.minute.toString().padLeft(2, '0')} $amPm";
+      final opId = parkingSlipDetails['id'] ?? '';
+      final now = DateTime.now();
+      final ctt = formatDateTime(now);
 
-      String checkinDate = checkinTime != null
-          ? "${checkinTime!.year}/${checkinTime!.month}/${checkinTime!.day}"
-          : 'Unknown';
+      final rId = item['receipt_id']?.toString() ?? '';
+      final vNo = item['vehicle_number']?.toString() ?? '';
+      final vType = item['vehicle_type']?.toString() ?? '';
+      final cIn =
+          DateTime.tryParse(item['checkin_time']?.toString() ?? '') ?? now;
 
-      String checkinHour = checkinTime != null
-          ? (checkinTime!.hour % 12 == 0)
-                ? '12'
-                : (checkinTime!.hour % 12).toString()
-          : 'Unknown';
+      final diff = now.difference(cIn);
+      final duration = '${diff.inHours}h ${diff.inMinutes.remainder(60)}m';
 
-      String checkinAmPm = checkinTime != null
-          ? (checkinTime!.hour < 12 ? 'AM' : 'PM')
-          : '';
+      // 1. Print on Android Thermal Printer
+      try {
+        await _channel.invokeMethod('setPrinterPrintFontSize', {'fontSize': 35});
+        await _channel.invokeMethod('setPrinterPrintAlignment', {'alignment': 1});
+        await _channel.invokeMethod('printText', {'text': '$heading1\n$heading2\n$heading3\n$heading4'});
+        await _channel.invokeMethod('printerPerformPrint', {'feedLines': 20});
 
-      String formattedCheckinTime = checkinTime != null
-          ? "$checkinHour:${checkinTime!.minute.toString().padLeft(2, '0')} $checkinAmPm"
-          : 'Unknown';
+        await _channel.invokeMethod('setPrinterPrintFontSize', {'fontSize': 25});
+        await _channel.invokeMethod('setPrinterPrintAlignment', {'alignment': 0});
+        await _channel.invokeMethod('printText', {
+          'text': 'Vehicle Number: $vNo\n'
+              'Vehicle Type: $vType\n'
+              'Receipt ID: $rId\n'
+              'Check-out BY: $fullName\n'
+              'Check-in: ${formatDateTime(cIn)}\n'
+              'Check-out: $ctt\n'
+              'Duration: $duration\n'
+              'Paid by: ${paymentMethod == 'QR' ? 'QR' : 'Cash'}',
+        });
+        await _channel.invokeMethod('printerPerformPrint', {'feedLines': 20});
 
-      String duration = 'Unknown';
-      if (checkinTime != null) {
-        final difference = now.difference(checkinTime!);
-        duration =
-            '${difference.inHours}h ${difference.inMinutes.remainder(60)}m';
+        await _channel.invokeMethod('setPrinterPrintFontSize', {'fontSize': 35});
+        await _channel.invokeMethod('setPrinterPrintAlignment', {'alignment': 1});
+        await _channel.invokeMethod('printText', {'text': 'Total Fee: Rs. ${fee.toStringAsFixed(0)}'});
+        if (footerText != null && footerText.isNotEmpty) {
+          await _channel.invokeMethod('printerPerformPrint', {'feedLines': 10});
+          await _channel.invokeMethod('setPrinterPrintFontSize', {'fontSize': 22});
+          await _channel.invokeMethod('printText', {'text': footerText});
+        }
+        await _channel.invokeMethod('printerPerformPrint', {'feedLines': 80});
+      } catch (printErr) {
+        debugPrint("Printing failed: $printErr");
       }
 
-      await _channel.invokeMethod('setPrinterPrintFontSize', {'fontSize': 35});
-      await _channel.invokeMethod('setPrinterPrintAlignment', {'alignment': 1});
-      await _channel.invokeMethod('printText', {'text': heading1});
-      await _channel.invokeMethod('printText', {'text': heading2});
-      await _channel.invokeMethod('printText', {'text': heading3});
-      await _channel.invokeMethod('printText', {'text': heading4});
-      await _channel.invokeMethod('printerPerformPrint', {'feedLines': 20});
-      await _channel.invokeMethod('setPrinterPrintFontSize', {'fontSize': 25});
-      await _channel.invokeMethod('setPrinterPrintAlignment', {'alignment': 0});
-      await _channel.invokeMethod('printText', {
-        'text':
-            'Vehicle Number: $vehicleNumber\n'
-            'Vehicle Type: $vehicleType\n'
-            'Receipt ID: $receiptId\n'
-            'Check-out BY: $fullName\n'
-            'Check-in Date: $checkinDate\n'
-            'Check-in Time: $formattedCheckinTime\n'
-            'Check-out Date: $checkoutDate\n'
-            'Check-out Time: $checkoutTime\n'
-            'Duration: $duration\n'
-            'Paid by: ${paymentMethod == 'QR' ? 'QR' : 'Cash'}',
-      });
-      await _channel.invokeMethod('printerPerformPrint', {'feedLines': 20});
-      await _channel.invokeMethod('setPrinterPrintFontSize', {'fontSize': 40});
-      await _channel.invokeMethod('setPrinterPrintAlignment', {'alignment': 1});
-      await _channel.invokeMethod('printText', {
-        'text': 'Total fee: RS $amount',
-      });
-      await _channel.invokeMethod('printerPerformPrint', {'feedLines': 100});
-
+      // 2. Save in local database
       await _dbHelper.updateCheckOutRecord({
-        'receipt_id': receiptId,
-        'checkout_time': ctt.toString(),
-        'amount': amount,
+        'receipt_id': rId,
+        'checkout_time': ctt,
+        'amount': fee,
         'duration': duration,
-        'checkedout_by': id,
+        'checkedout_by': opId,
         'payment_method': paymentMethod,
       });
 
-      final checkOutResponse = await vehicleService.checkOut(
-        receiptId: receiptId,
-        vehicleNumber: vehicleNumber,
-        vehicleType: vehicleType,
-        checkoutTime: "$co",
-        amount: amount,
-        paymentMethod: paymentMethod,
-      );
-
-      print(checkOutResponse);
+      // 3. Online sync attempt
+      try {
+        await vehicleService.checkOut(
+          receiptId: rId,
+          vehicleNumber: vNo,
+          vehicleType: vType,
+          checkoutTime: now.toIso8601String(),
+          amount: fee,
+          paymentMethod: paymentMethod,
+        );
+      } catch (_) {}
 
       if (!mounted) return;
+      HapticFeedback.heavyImpact();
+
       ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            '✅ Checkout successful — '
-            '${paymentMethod == 'QR' ? 'QR' : 'Cash'} '
-            'RS ${amount.toStringAsFixed(0)}',
-          ),
           behavior: SnackBarBehavior.floating,
           backgroundColor: Colors.green,
+          content: Text(
+            '✅ Checkout Successful: $vNo | ${paymentMethod == 'QR' ? 'QR' : 'Cash'} Rs. ${fee.toStringAsFixed(0)}',
+          ),
           duration: const Duration(seconds: 2),
         ),
       );
-      Future.delayed(const Duration(seconds: 1), () {
-        if (!mounted) return;
-        _resetState();
-      });
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).clearSnackBars();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error during checkout'),
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: Colors.red,
-        ),
-      );
-    } finally {
-      setState(() {
-        isLoading = false;
-      });
-    }
-  }
 
-  Widget _payButton({
-    required String label,
-    required IconData icon,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return ElevatedButton.icon(
-      style: ElevatedButton.styleFrom(
-        backgroundColor: color,
-        disabledBackgroundColor: color.withValues(alpha: 0.5),
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-        ),
-      ),
-      onPressed: isLoading ? null : onTap,
-      icon: isLoading
-          ? const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: Colors.white,
-              ),
-            )
-          : Icon(icon, color: Colors.white),
-      label: Text(
-        label,
-        style: const TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.bold,
-          fontSize: 16,
-        ),
-      ),
-    );
-  }
-
-  void _resetState() {
-    setState(() {
-      _searchResults = [];
-      _vehicleNumberController.clear();
-      parkingFee = null;
-      receiptId = "";
-      vehicleNumber = "";
-      vehicleType = "";
-      vehicleType = "";
-      checkinTime = null;
-      _isOffline = false;
-    });
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    fetchvehilceratesandprintdetails();
-    fetchfreetime();
-    _initPrinter();
-  }
-
-  // Bind + initialize the printer once when the screen opens, so each
-  // checkout doesn't pay the bind/init cost again.
-  Future<void> _initPrinter() async {
-    try {
-      await _channel.invokeMethod('bindPrinterService');
-      await _channel.invokeMethod('initializePrinter');
+      // Refresh search list
+      _searchVehicle();
     } catch (e) {
-      print('Printer init error: $e');
-    }
-  }
-
-  Future<void> fetchfreetime() async {
-    final value = await SecureStorage.getFreeTime();
-
-    setState(() {
-      freeTime = value;
-    });
-  }
-
-  Future<void> fetchvehilceratesandprintdetails() async {
-    try {
-      List<dynamic> ratesData = await SecureStorage.getParkingRates();
-      Map<String, String> printDetails =
-          await SecureStorage.getParkingSlipDetails();
-
-      // Convert dynamic list to VehicleRate objects
-      List<VehicleRate> rates = ratesData.map((rateJson) {
-        if (rateJson is Map<String, dynamic>) {
-          return VehicleRate.fromJson(rateJson);
-        } else {
-          // If it's already a Map but not Map<String, dynamic>, convert it
-          return VehicleRate.fromJson(Map<String, dynamic>.from(rateJson));
-        }
-      }).toList();
-
-      setState(() {
-        vehicleRates = rates;
-        parkingSlipDetails = printDetails;
-      });
-
-      print('Successfully loaded ${rates.length} vehicle rates');
-    } catch (e) {
-      print('Error fetching vehicle rates and print details: $e');
-      // Show error to user
       if (mounted) {
-        ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Failed to load parking rates'),
             behavior: SnackBarBehavior.floating,
+            content: Text('Checkout failed: $e'),
             backgroundColor: Colors.red,
           ),
         );
       }
+    } finally {
+      if (mounted) setState(() => _isCheckingOut = false);
     }
+  }
+
+  List<dynamic> get _filteredResults {
+    if (_selectedFilter == 'PARKED') {
+      return _searchResults.where((v) => v['checkout_status'] != true).toList();
+    } else if (_selectedFilter == 'CHECKED_OUT') {
+      return _searchResults.where((v) => v['checkout_status'] == true).toList();
+    }
+    return _searchResults;
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       key: _scaffoldKey,
-      backgroundColor: const Color(0xFF668DAF),
+      backgroundColor: const Color(0xFF6E93B3),
       body: SafeArea(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: TextField(
-                controller: _vehicleNumberController,
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: InputDecoration(
-                  labelText: 'Vehicle Number',
-                  labelStyle: const TextStyle(color: Colors.white70),
-                  prefixIcon: const Icon(Icons.search, color: Colors.white70),
-                  enabledBorder: OutlineInputBorder(
-                    borderSide: const BorderSide(color: Colors.white30),
-                    borderRadius: BorderRadius.circular(8),
+            // Search Input Header Card
+            Container(
+              margin: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Colors.black12,
+                    blurRadius: 6,
+                    offset: Offset(0, 2),
                   ),
-                  focusedBorder: OutlineInputBorder(
-                    borderSide: const BorderSide(color: Colors.white),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
+                ],
               ),
-            ),
-
-            // Search Button
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0),
-              child: SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF004DE8),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                  onPressed: _isLoading ? null : _searchVehicle,
-                  child: const Text(
-                    'Search',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 10),
-
-            // Loading Indicator
-            if (_isLoading)
-              const Padding(
-                padding: EdgeInsets.all(8.0),
-                child: Center(
-                  child: CircularProgressIndicator(color: Colors.white),
-                ),
-              ),
-
-            // Search Results
-            if (_searchResults.isNotEmpty)
-              Expanded(
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: _searchResults.length,
-                        itemBuilder: (context, index) {
-                          final vehicle = _searchResults[index];
-                          return Card(
-                            margin: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 4,
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _vehicleNumberController,
+                          decoration: InputDecoration(
+                            hintText: "Enter vehicle number (e.g. 1234)",
+                            prefixIcon: const Icon(Icons.search, color: Colors.black54),
+                            filled: true,
+                            fillColor: const Color(0xFFF0F4F8),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: BorderSide.none,
                             ),
-                            color: const Color(0xFF1A2B5A),
-                            child: ListTile(
-                              title: Text(
-                                'Vehicle: ${vehicle['vehicle_number']}',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 12,
+                            ),
+                          ),
+                          onSubmitted: (_) => _searchVehicle(),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        height: 48,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF004DE8),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
+                          onPressed: _isLoading ? null : _searchVehicle,
+                          child: _isLoading
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Text(
+                                  "Search",
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                 ),
-                              ),
-                              subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Type: ${vehicle['vehicle_type']}',
-                                    style: const TextStyle(
-                                      color: Colors.white70,
-                                    ),
-                                  ),
-                                  Text(
-                                    'Check-in: ${vehicle['checkin_time']}',
-                                    style: const TextStyle(
-                                      color: Colors.white70,
-                                    ),
-                                  ),
-                                  Text(
-                                    'Status: ${vehicle['checkout_status'] ? 'Checked out' : 'Parked'}',
-                                    style: const TextStyle(
-                                      color: Colors.white70,
-                                    ),
-                                  ),
-                                  if (parkingFee != null)
-                                    Text(
-                                      'Parking Fee: Rs. $parkingFee',
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.greenAccent,
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  if (_searchResults.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        _filterChip("ALL (${_searchResults.length})", 'ALL'),
+                        const SizedBox(width: 6),
+                        _filterChip(
+                          "PARKED (${_searchResults.where((v) => v['checkout_status'] != true).length})",
+                          'PARKED',
+                        ),
+                        const SizedBox(width: 6),
+                        _filterChip(
+                          "EXITED (${_searchResults.where((v) => v['checkout_status'] == true).length})",
+                          'CHECKED_OUT',
+                        ),
+                        const Spacer(),
+                        if (_isOffline)
+                          const Text(
+                            "📴 Local Results",
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.orange,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+
+            // Search Results List
+            Expanded(
+              child: _searchResults.isEmpty && !_isLoading
+                  ? const Center(
+                      child: Text(
+                        "Enter a vehicle number or plate to search",
+                        style: TextStyle(color: Colors.white, fontSize: 14),
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      itemCount: _filteredResults.length,
+                      itemBuilder: (context, index) {
+                        final vehicle = _filteredResults[index];
+                        final isCheckedOut = vehicle['checkout_status'] == true;
+                        final fee = calculateParkingFee(vehicle);
+
+                        return Card(
+                          margin: const EdgeInsets.symmetric(vertical: 5),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          elevation: 2,
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF090044),
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(
+                                        vehicle['vehicle_number']?.toString() ?? '',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 15,
+                                        ),
                                       ),
                                     ),
-                                ],
-                              ),
-                              trailing: vehicle['checkout_status']
-                                  ? const Icon(
-                                      Icons.check_circle,
-                                      color: Colors.green,
-                                    )
-                                  : const Icon(
-                                      Icons.timer,
-                                      color: Colors.orange,
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      vehicle['vehicle_type']?.toString() ?? '',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.grey.shade700,
+                                      ),
                                     ),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-
-                    // Payment method buttons (Cash / QR)
-                    if (!_searchResults[0]['checkout_status'] &&
-                        parkingFee != null)
-                      Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          children: [
-                            const Text(
-                              'Tap how the customer paid',
-                              style: TextStyle(
-                                color: Colors.white70,
-                                fontSize: 13,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: _payButton(
-                                    label: 'CASH',
-                                    icon: Icons.payments,
-                                    color: Colors.green,
-                                    onTap: () => handleCheckoutAndPrint(
-                                      paymentMethod: 'CASH',
+                                    const Spacer(),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: isCheckedOut
+                                            ? Colors.grey.shade200
+                                            : Colors.green.shade100,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(
+                                        isCheckedOut ? "CHECKED OUT" : "PARKED INSIDE",
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                          color: isCheckedOut
+                                              ? Colors.grey.shade800
+                                              : Colors.green.shade900,
+                                        ),
+                                      ),
                                     ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  "Check-in: ${vehicle['checkin_time'] ?? ''}",
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey.shade600,
                                   ),
                                 ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: _payButton(
-                                    label: 'QR',
-                                    icon: Icons.qr_code,
-                                    color: const Color(0xFF004DE8),
-                                    onTap: () => handleCheckoutAndPrint(
-                                      paymentMethod: 'QR',
+                                if (vehicle['receipt_id'] != null)
+                                  Text(
+                                    "Receipt ID: ${vehicle['receipt_id']}",
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade500,
                                     ),
                                   ),
+                                const Divider(height: 16),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text(
+                                      isCheckedOut
+                                          ? "Amount: Rs. ${vehicle['amount'] ?? '0'}"
+                                          : "Fee Due: Rs. ${fee?.toStringAsFixed(0) ?? '0'}",
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                        color: isCheckedOut
+                                            ? Colors.grey.shade800
+                                            : Colors.green.shade800,
+                                      ),
+                                    ),
+                                    if (!isCheckedOut && fee != null)
+                                      Row(
+                                        children: [
+                                          ElevatedButton.icon(
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: Colors.green.shade800,
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 10,
+                                                vertical: 6,
+                                              ),
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(6),
+                                              ),
+                                            ),
+                                            icon: const Icon(
+                                              Icons.payments,
+                                              size: 15,
+                                              color: Colors.white,
+                                            ),
+                                            label: const Text(
+                                              "CASH",
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                            onPressed: _isCheckingOut
+                                                ? null
+                                                : () => handleCheckoutAndPrint(
+                                                      item: vehicle,
+                                                      paymentMethod: 'CASH',
+                                                    ),
+                                          ),
+                                          const SizedBox(width: 6),
+                                          ElevatedButton.icon(
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: const Color(0xFF004DE8),
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 10,
+                                                vertical: 6,
+                                              ),
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(6),
+                                              ),
+                                            ),
+                                            icon: const Icon(
+                                              Icons.qr_code,
+                                              size: 15,
+                                              color: Colors.white,
+                                            ),
+                                            label: const Text(
+                                              "QR",
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                            onPressed: _isCheckingOut
+                                                ? null
+                                                : () => handleCheckoutAndPrint(
+                                                      item: vehicle,
+                                                      paymentMethod: 'QR',
+                                                    ),
+                                          ),
+                                        ],
+                                      ),
+                                  ],
                                 ),
                               ],
                             ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-
-            // No Results Message
-            if (_searchResults.isEmpty && !_isLoading)
-              const Expanded(
-                child: Center(
-                  child: Text(
-                    'No results found',
-                    style: TextStyle(color: Colors.white70),
-                  ),
-                ),
-              ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _filterChip(String label, String value) {
+    final isSelected = _selectedFilter == value;
+    return InkWell(
+      onTap: () => setState(() => _selectedFilter = value),
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF090044) : Colors.grey.shade200,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+            color: isSelected ? Colors.white : Colors.black87,
+          ),
         ),
       ),
     );

@@ -159,6 +159,7 @@ class DatabaseHelper {
       'checkedin_by',
       'checkedout_by',
       'amount',
+      'duration',
       'payment_method',
     ]);
 
@@ -172,6 +173,7 @@ class DatabaseHelper {
         record['checkedin_by'],
         record['checkedout_by'],
         record['amount'],
+        record['duration'],
         record['payment_method'],
       ]);
     }
