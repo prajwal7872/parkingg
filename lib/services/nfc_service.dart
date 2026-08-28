@@ -28,7 +28,8 @@ class NfcCardService {
   final StreamController<NfcCardResult> _cardScanStreamController =
       StreamController<NfcCardResult>.broadcast();
 
-  Stream<NfcCardResult> get onCardScanned => _cardScanStreamController.stream;
+  Stream<NfcCardResult> get onCardScanned =>
+      _cardScanStreamController.stream;
 
   factory NfcCardService() => _instance;
 

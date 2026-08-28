@@ -66,6 +66,7 @@ class _RenewMemberState extends State<RenewMember> {
             },
           ),
         );
+        _registrationData.cardUid = data['card_uid'];
 
         _isLoading = false;
       });
@@ -161,4 +162,5 @@ class RenewRegistrationData {
   String? paymentMethod;
   String? totalAmount;
   String? recievedBy;
+  String? cardUid;
 }

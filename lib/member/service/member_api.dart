@@ -74,4 +74,43 @@ class ReportService {
       throw Exception('Error fetching member data');
     }
   }
+
+  static Future<Map<String, dynamic>> replaceCard({
+    required int memberId,
+    required String newCardUid,
+    double fee = 0.0,
+    String paymentMethod = 'CASH',
+    String receivedBy = '',
+  }) async {
+    try {
+      final token = await SecureStorage.getAccessToken();
+      final uri = Uri.parse(
+        '${ApiEndpoints.baseUrl}membership/members/$memberId/replace-card/',
+      );
+      final response = await http.post(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: json.encode({
+          'new_card_uid': newCardUid,
+          'fee': fee,
+          'payment_method': paymentMethod,
+          'received_by': receivedBy,
+        }),
+      );
+      final data = json.decode(response.body);
+      if (response.statusCode == 200) {
+        return {'success': true, 'message': 'Card replaced successfully', 'data': data};
+      } else {
+        return {
+          'success': false,
+          'message': data['error'] ?? data['message'] ?? 'Failed to replace card',
+        };
+      }
+    } catch (e) {
+      return {'success': false, 'message': e.toString()};
+    }
+  }
 }

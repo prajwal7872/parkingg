@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:nepali_utils/nepali_utils.dart';
 import 'package:parking/member/renew/screens/renew_member.dart';
 import 'package:parking/member/screens/view_member.dart';
-import 'package:nepali_utils/nepali_utils.dart';
 import 'package:parking/member/update/screens/editmember.dart';
 
 class ReportDataTable extends StatelessWidget {
@@ -70,12 +70,15 @@ class ReportDataTable extends StatelessWidget {
       child: DataTable(
         dataRowColor: WidgetStateProperty.all(Colors.white),
         headingRowColor: WidgetStateProperty.all(const Color(0xFFD4E8FF)),
-        columnSpacing: 20,
-        dataRowMinHeight: 40,
+        columnSpacing: 16,
+        dataRowMinHeight: 45,
         dataRowMaxHeight: 80,
         columns: const [
           DataColumn(
             label: Text('SN', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          DataColumn(
+            label: Text('Smart Card', style: TextStyle(fontWeight: FontWeight.bold)),
           ),
           DataColumn(
             label: Text(
@@ -102,6 +105,8 @@ class ReportDataTable extends StatelessWidget {
         rows: List<DataRow>.generate(attendanceData.length, (index) {
           final record = attendanceData[index];
           final vehicles = record['vehicles'] as List<dynamic>? ?? [];
+          final cardUid = record['card_uid']?.toString() ?? '';
+          final isInside = record['is_inside'] == true;
 
           // Get vehicle numbers from vehicles list
           final vehicleNumbers = vehicles
@@ -116,61 +121,96 @@ class ReportDataTable extends StatelessWidget {
             cells: [
               DataCell(
                 Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Align(
-                      alignment: Alignment.topLeft,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: expiryStatus['color'].withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              expiryStatus['icon'],
-                              size: 12,
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: expiryStatus['color'].withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            expiryStatus['icon'],
+                            size: 11,
+                            color: expiryStatus['color'],
+                          ),
+                          const SizedBox(width: 3),
+                          Text(
+                            expiryStatus['label'],
+                            style: TextStyle(
+                              fontSize: 10,
                               color: expiryStatus['color'],
+                              fontWeight: FontWeight.bold,
                             ),
-                            const SizedBox(width: 4),
-                            Text(
-                              expiryStatus['label'],
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: expiryStatus['color'],
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
                     ),
-                    Text('${index + 1}'),
+                    const SizedBox(height: 2),
+                    Text('${index + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
+
+              // Smart Card UID cell
+              DataCell(
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: cardUid.isNotEmpty ? const Color(0xFFE8F5E9) : Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: cardUid.isNotEmpty ? Colors.green.shade600 : Colors.grey.shade400,
+                          width: 0.8,
+                        ),
+                      ),
+                      child: Text(
+                        cardUid.isNotEmpty ? cardUid : 'No Card',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: cardUid.isNotEmpty ? Colors.green.shade900 : Colors.grey.shade600,
+                        ),
+                      ),
+                    ),
+                    if (isInside)
+                      const Text(
+                        '🟢 INSIDE',
+                        style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.green),
+                      ),
+                  ],
+                ),
+              ),
+
               DataCell(
                 SizedBox(
-                  width: 150,
-
+                  width: 140,
                   child: Text(
                     vehicleNumbers.isNotEmpty ? vehicleNumbers : 'N/A',
-                    style: const TextStyle(fontSize: 12),
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
                   ),
                 ),
               ),
               // Phone
-              DataCell(Text(record['phone'] ?? '-')),
+              DataCell(Text(record['phone'] ?? '-', style: const TextStyle(fontSize: 12))),
               // Expiry Date
               DataCell(
                 Text(
                   record['expiry_date'] ?? '-',
                   style: const TextStyle(
                     color: Colors.black,
-                    fontWeight: FontWeight.normal,
+                    fontSize: 12,
                   ),
                 ),
               ),
@@ -222,7 +262,7 @@ class ReportDataTable extends StatelessWidget {
                         children: [
                           Icon(Icons.visibility, size: 16),
                           SizedBox(width: 8),
-                          Text('View Details', style: TextStyle(fontSize: 13)),
+                          Text('View & Replace Card', style: TextStyle(fontSize: 13)),
                         ],
                       ),
                     ),

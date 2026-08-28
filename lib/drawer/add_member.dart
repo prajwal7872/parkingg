@@ -175,4 +175,5 @@ class RegistrationData {
   String? paymentMethod;
   String? totalAmount;
   String? recievedBy;
+  String? cardUid;
 }

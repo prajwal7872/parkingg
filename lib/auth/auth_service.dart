@@ -101,6 +101,10 @@ class SecureStorage {
     return await _storage.read(key: refreshTokenKey);
   }
 
+  static Future<String?> getFullName() async {
+    return await _storage.read(key: fullNameKey);
+  }
+
   /// Get free time (returns int, defaults to 0 if not set) 👈 Added
   static Future<int> getFreeTime() async {
     final value = await _storage.read(key: freeTimeKey);
